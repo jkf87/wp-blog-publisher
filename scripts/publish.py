@@ -118,6 +118,26 @@ def try_basic_auth(wp_url, username, password):
         return None, None
     if r.status_code == 200:
         return session, r.json()
+
+    # --- 실패 원인 진단 ---
+    if r.status_code == 401:
+        try:
+            body = r.json()
+            code = body.get('code', '')
+        except ValueError:
+            code = ''
+        if code == 'rest_not_logged_in':
+            warn('401 rest_not_logged_in — Authorization 헤더가 PHP에 전달되지 않고 있습니다')
+            warn('  → Railway Apache 환경이라면 Custom Start Command가 필요합니다:')
+            warn('    Settings → Custom Start Command에 auth-header 설정 추가')
+            warn('    (자세한 명령은 references/railway-wp-setup.md 참조)')
+        elif code == 'incorrect_password' or 'incorrect' in code:
+            warn('401 — 비밀번호가 올바르지 않습니다')
+            warn('  → Application Password를 사용하고 있는지 확인하세요 (로그인 비밀번호 아님!)')
+            warn('  → wp-admin → 사용자 → 프로필 → Application Passwords에서 새로 발급')
+        else:
+            warn(f'401 — 인증 실패 (code: {code})')
+            warn('  → Application Password가 유효한지 확인하세요')
     return None, None
 
 
@@ -143,6 +163,9 @@ def try_cookie_auth(wp_url, username, password):
         # 로그인 성공 시 302 리다이렉트, 실패 시 200(로그인 폼 재표시)
         if r.status_code == 200:
             warn('Cookie auth 로그인 실패 (자격증명 거부됨)')
+            warn('  → Cookie 인증에는 워드프레스 "로그인 비밀번호"가 필요합니다')
+            warn('  → Application Password로는 Cookie 로그인이 불가능합니다')
+            warn('  → Basic Auth가 되면 Cookie 인증은 필요 없습니다 (Railway Start Command 확인)')
             return None, None
         # 리다이렉트를 따라가서 세션 쿠키 확보
         if r.status_code in (301, 302):
@@ -201,7 +224,131 @@ def authenticate(wp_url, username, password):
         ok(f'User: {user["name"]} (ID: {user["id"]})')
         return session
 
-    err_exit('모든 인증 방법 실패')
+    err_exit(
+        '모든 인증 방법 실패.\n'
+        '  아래를 순서대로 확인하세요:\n'
+        '  1) WP_URL이 정확한지 (브라우저에서 접속 확인)\n'
+        '  2) Railway Custom Start Command가 적용되었는지 (Apache Authorization 헤더 전달 필요)\n'
+        '  3) Application Password가 유효한지 (wp-admin → 사용자 → 프로필에서 새로 발급)\n'
+        '  4) WP_USER가 워드프레스 "계정명"인지 (Application Password 라벨이 아님)\n'
+        '  진단 실행: python3 publish.py --diagnose --url <WP_URL> --user <USER> --password <PASS>'
+    )
+
+
+def diagnose(wp_url, username, password):
+    """WordPress 연결 및 인증 상태를 진단합니다."""
+    print(_c('36', '\n=== WP Blog Publisher 진단 모드 ===\n'))
+    issues = []
+
+    # 1) 사이트 접속 확인
+    step(1, f'사이트 접속 테스트: {wp_url}')
+    try:
+        r = requests.get(wp_url, timeout=15, allow_redirects=True)
+        if r.status_code == 200:
+            ok(f'사이트 접속 성공 (HTTP {r.status_code})')
+        else:
+            warn(f'HTTP {r.status_code} — 사이트가 정상적으로 응답하지 않습니다')
+            issues.append('사이트 접속 문제')
+    except requests.exceptions.ConnectionError:
+        warn('연결 실패 — URL이 정확한지, 서비스가 실행 중인지 확인하세요')
+        issues.append('사이트 접속 불가')
+    except requests.exceptions.Timeout:
+        warn('응답 시간 초과 (15s)')
+        issues.append('사이트 응답 시간 초과')
+
+    # 2) REST API 엔드포인트 확인
+    step(2, 'REST API 엔드포인트 확인')
+    try:
+        r = requests.get(f'{wp_url}/wp-json/', timeout=15)
+        if r.status_code == 200:
+            ok('REST API 엔드포인트 정상')
+            try:
+                info = r.json()
+                ok(f'사이트 이름: {info.get("name", "N/A")}')
+            except ValueError:
+                warn('REST API가 JSON이 아닌 응답 반환')
+        elif r.status_code == 404:
+            warn('REST API 비활성 또는 Permalink 설정 필요')
+            warn('  → 관리자 → 설정 → 고유주소에서 "글 이름" 등으로 변경')
+            issues.append('REST API 비활성')
+        else:
+            warn(f'REST API 응답: HTTP {r.status_code}')
+    except Exception as e:
+        warn(f'REST API 접근 실패: {e}')
+        issues.append('REST API 접근 실패')
+
+    # 3) Authorization 헤더 전달 확인 (Basic Auth)
+    step(3, 'Basic Auth (Application Password) 테스트')
+    token = b64encode(f'{username}:{password}'.encode()).decode()
+    try:
+        r = requests.get(
+            f'{wp_url}/wp-json/wp/v2/users/me',
+            headers={'Authorization': f'Basic {token}'},
+            timeout=15
+        )
+        if r.status_code == 200:
+            user = r.json()
+            ok(f'Basic Auth 성공! 사용자: {user.get("name")} (ID: {user.get("id")})')
+            ok('→ 이 자격증명으로 publish.py 정상 실행 가능합니다')
+        elif r.status_code == 401:
+            try:
+                body = r.json()
+                code = body.get('code', '')
+                message = body.get('message', '')
+            except ValueError:
+                code, message = '', r.text[:200]
+
+            warn(f'Basic Auth 실패 — HTTP 401 (code: {code})')
+
+            if code == 'rest_not_logged_in':
+                warn('  원인: Apache가 Authorization 헤더를 PHP로 전달하지 않고 있습니다')
+                warn('  해결: Railway → Settings → Custom Start Command에 다음 명령 입력:')
+                print()
+                print('  bash -c "a2dismod mpm_event mpm_worker || true; '
+                      'a2enmod mpm_prefork rewrite || true; '
+                      'printf \'%s\\n\' \'SetEnvIfNoCase Authorization \"^(.*)\" HTTP_AUTHORIZATION=$1\' '
+                      '> /etc/apache2/conf-available/auth-header.conf; '
+                      'a2enconf auth-header || true; docker-entrypoint.sh apache2-foreground"')
+                print()
+                issues.append('Apache Authorization 헤더 미전달 → Custom Start Command 필요')
+            elif 'incorrect' in code:
+                warn('  원인: 비밀번호가 틀립니다')
+                warn('  확인: Application Password를 사용하고 있는지 (로그인 비밀번호 아님)')
+                warn('  발급: wp-admin → 사용자 → 프로필 → Application Passwords')
+                issues.append('Application Password 불일치')
+            else:
+                warn(f'  응답: {message}')
+                issues.append(f'Basic Auth 인증 실패: {code}')
+        else:
+            warn(f'예상치 못한 응답: HTTP {r.status_code}')
+    except Exception as e:
+        warn(f'Basic Auth 요청 실패: {e}')
+        issues.append('Basic Auth 요청 실패')
+
+    # 4) Application Password 형식 확인
+    step(4, 'Application Password 형식 확인')
+    stripped = password.replace(' ', '')
+    if len(stripped) == 24 and stripped.isalnum():
+        ok(f'형식 정상 (24자 영숫자, 공백 포함 {len(password)}자)')
+    else:
+        warn(f'형식 의심: 길이 {len(stripped)}자 (공백 제외)')
+        warn('  일반적인 Application Password: 24자 영숫자 (공백 포함 29자)')
+        warn('  로그인 비밀번호를 사용하고 있다면 Application Password를 발급받으세요')
+        issues.append('Application Password 형식 의심')
+
+    # 결과 요약
+    print(_c('36', '\n=== 진단 결과 ==='))
+    if not issues:
+        ok('모든 검사 통과! publish.py로 게시할 수 있습니다.')
+    else:
+        warn(f'발견된 문제 {len(issues)}건:')
+        for i, issue in enumerate(issues, 1):
+            print(f'  {i}. {issue}')
+        print()
+        print('  위 문제를 순서대로 해결한 뒤 다시 진단하세요:')
+        print('  python3 publish.py --diagnose')
+
+    sys.exit(0 if not issues else 1)
 
 
 def api(session, wp_url, method, endpoint, **kwargs):
@@ -494,7 +641,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='환경 변수 (scripts/.env 파일): WP_URL, WP_USER, WP_APP_PASSWORD, WP_POST_STATUS'
     )
-    parser.add_argument('post_file', help='Blog post markdown file path')
+    parser.add_argument('post_file', nargs='?', default=None, help='Blog post markdown file path')
     parser.add_argument('wp_url', nargs='?', default=None, help='WordPress site URL (또는 WP_URL 환경 변수)')
     parser.add_argument('username', nargs='?', default=None, help='WordPress username (또는 WP_USER 환경 변수)')
     parser.add_argument('password', nargs='?', default=None, help='Application password (또는 WP_APP_PASSWORD 환경 변수)')
@@ -502,6 +649,7 @@ def main():
     parser.add_argument('--user', dest='opt_user', help='WordPress username')
     parser.add_argument('--password', '-p', dest='opt_password', help='Application password')
     parser.add_argument('--draft', action='store_true', help='Create as draft instead of publishing')
+    parser.add_argument('--diagnose', action='store_true', help='Run connection & auth diagnostics (no post needed)')
     args = parser.parse_args()
 
     # 우선순위: 명령줄 옵션 > 위치 인자 > 환경 변수
@@ -509,6 +657,16 @@ def main():
     username = args.opt_user or args.username or os.environ.get('WP_USER', '')
     password = args.opt_password or args.password or os.environ.get('WP_APP_PASSWORD', '')
     status = 'draft' if args.draft else os.environ.get('WP_POST_STATUS', 'publish')
+
+    # 진단 모드
+    if args.diagnose:
+        if not wp_url or not username or not password:
+            missing = []
+            if not wp_url: missing.append('WP_URL (--url)')
+            if not username: missing.append('WP_USER (--user)')
+            if not password: missing.append('WP_APP_PASSWORD (--password)')
+            err_exit(f'진단에 필요한 값 누락: {", ".join(missing)}')
+        diagnose(wp_url, username, password)
 
     if not wp_url or not username or not password:
         missing = []
@@ -519,6 +677,12 @@ def main():
         print(f'  .env 파일 또는 명령줄 인자로 지정하세요.')
         print(f'  cp scripts/.env.example scripts/.env  # 템플릿 복사 후 편집')
         sys.exit(1)
+
+    # post_file 필수 확인 (진단 모드가 아닐 때)
+    if not args.post_file:
+        err_exit('블로그 포스트 파일 경로가 필요합니다.\n'
+                 '  사용법: python3 publish.py <blog_post.md>\n'
+                 '  진단:   python3 publish.py --diagnose')
 
     if env_file:
         print(f'0. Loaded config from {env_file}')

@@ -30,6 +30,52 @@ category: content-publishing
 | SEO/AEO 최적화가 필요한 콘텐츠 | 랜딩 페이지/세일즈 카피 |
 | 이미지가 포함된 원본을 그대로 활용 | 멀티사이트 대량 게시 |
 
+## Quick Start (처음 사용 시 반드시 읽기)
+
+게시 실패의 90%는 **아래 체크리스트를 건너뛴 경우** 발생합니다.
+
+### 사전 조건 체크리스트
+
+```
+□ 1. Railway WordPress 프리셋 배포 완료
+□ 2. Custom Start Command 적용 (Apache 인증 헤더 + MPM 수정)
+     → Railway 서비스 → Settings → Custom Start Command에 아래 입력:
+     bash -c "a2dismod mpm_event mpm_worker || true; a2enmod mpm_prefork rewrite || true; printf '%s\n' 'SetEnvIfNoCase Authorization \"^(.*)\" HTTP_AUTHORIZATION=$1' > /etc/apache2/conf-available/auth-header.conf; a2enconf auth-header || true; docker-entrypoint.sh apache2-foreground"
+□ 3. WordPress 초기 설정 완료 (사이트 제목, 고유주소 설정)
+□ 4. Application Password 발급
+     → wp-admin → 사용자 → 프로필 → Application Passwords
+     → 이름(라벨)은 아무거나 OK, 발급된 비밀번호(xxxx xxxx ... 형식)를 복사
+     → ⚠️ 이 비밀번호는 로그인 비밀번호와 다릅니다!
+□ 5. scripts/.env 설정
+     → cp scripts/.env.example scripts/.env
+     → WP_URL, WP_USER, WP_APP_PASSWORD 입력
+□ 6. 진단 실행으로 연결 확인
+     → python3 scripts/publish.py --diagnose
+     → 모든 검사 통과(OK) 확인
+```
+
+> **Step 2를 건너뛰면** Basic Auth가 401로 실패하고, Cookie Auth도 App Password로는 로그인 불가하여 **모든 인증이 실패**합니다.
+
+### 진단 모드 (인증 문제 해결)
+
+인증 실패 시 원인을 자동으로 분석합니다:
+
+```bash
+# .env가 설정된 경우
+python3 scripts/publish.py --diagnose
+
+# 직접 지정
+python3 scripts/publish.py --diagnose --url https://사이트 --user 계정명 --password "xxxx xxxx xxxx xxxx xxxx xxxx"
+```
+
+진단 항목:
+1. 사이트 접속 가능 여부
+2. REST API 엔드포인트 활성 여부
+3. Basic Auth 인증 성공 여부 (실패 시 원인 + 해결법 출력)
+4. Application Password 형식 검증
+
+---
+
 ## 사용법
 
 ```
