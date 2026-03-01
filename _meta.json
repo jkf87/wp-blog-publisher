@@ -1,0 +1,13 @@
+{
+  "ownerId": "conanssam",
+  "slug": "wp-blog-publisher",
+  "version": "2.0.0",
+  "publishedAt": 1740873600,
+  "updatedAt": 1740960000,
+  "description": "Railway 워드프레스 셋업부터 SEO/AEO 최적화 블로그 자동 게시까지 End-to-End 스킬",
+  "tags": ["wordpress", "railway", "seo", "aeo", "blog", "gutenberg", "publishing", "rest-api", "obsidian"],
+  "references": [
+    "references/gutenberg-blocks.md",
+    "references/railway-wp-setup.md"
+  ]
+}
